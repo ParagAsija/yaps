@@ -1,37 +1,36 @@
 /**
  * ==============================================================================
- * main.c - Testing /proc/[pid]/stat Parsing
+ * main.c - Testing Dynamic ProcessList and Full Metadata
  * ==============================================================================
  */
 
 #include <stdio.h>
-#include <stdlib.h>
-#include <dirent.h>
 #include "process.h"
 
 int main(void) {
-    DIR *dir = opendir("/proc");
-    if (!dir) {
-        perror("opendir /proc");
+    int current_tty = get_current_terminal_nr();
+    char current_tty_name[32];
+    format_tty_name(current_tty, current_tty_name, sizeof(current_tty_name));
+    printf("Current terminal: %s (device nr: %d)\n\n", current_tty_name, current_tty);
+
+    ProcessList *list = get_all_processes();
+    if (!list) {
+        fprintf(stderr, "Failed to inspect processes.\n");
         return 1;
     }
 
-    printf("%5s %5s %-5s %-8s %-10s %s\n", "PID", "PPID", "STATE", "TTY", "TIME(s)", "COMM");
-    printf("------------------------------------------------------------\n");
+    printf("%-10s %5s %5s %-8s %-8s %s\n", "USER", "PID", "PPID", "TTY", "TIME", "CMDLINE");
+    printf("----------------------------------------------------------------------\n");
 
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (is_pid_dir(entry->d_name)) {
-            pid_t pid = (pid_t)atoi(entry->d_name);
-            ProcessInfo proc;
-            if (read_process_info(pid, &proc) == 0) {
-                printf("%5d %5d %-5c %-8s %-10lu %s\n",
-                       proc.pid, proc.ppid, proc.state, proc.tty, proc.total_time, proc.comm);
-                free_process_info(&proc);
-            }
-        }
+    for (size_t i = 0; i < list->count && i < 25; i++) {
+        ProcessInfo *p = &list->items[i];
+        printf("%-10s %5d %5d %-8s %-8lu %s\n",
+               p->user, p->pid, p->ppid, p->tty, p->total_time,
+               p->cmdline ? p->cmdline : p->comm);
     }
 
-    closedir(dir);
+    printf("\nCollected %zu total processes into heap memory.\n", list->count);
+
+    free_process_list(list);
     return 0;
 }
