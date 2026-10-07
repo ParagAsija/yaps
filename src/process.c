@@ -13,6 +13,8 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <unistd.h>
+#include <pwd.h>
+#include <sys/types.h>
 
 int is_pid_dir(const char *name) {
     if (name == NULL || *name == '\0') {
@@ -58,6 +60,104 @@ void format_tty_name(int tty_nr, char *out_buf, size_t buf_len) {
     }
 }
 
+int get_current_terminal_nr(void) {
+    FILE *fp = fopen("/proc/self/stat", "r");
+    if (!fp) {
+        return 0;
+    }
+
+    char buffer[1024];
+    if (!fgets(buffer, sizeof(buffer), fp)) {
+        fclose(fp);
+        return 0;
+    }
+    fclose(fp);
+
+    char *last_paren = strrchr(buffer, ')');
+    if (!last_paren) {
+        return 0;
+    }
+
+    char state;
+    int ppid, pgrp, session, tty_nr = 0;
+    sscanf(last_paren + 1, " %c %d %d %d %d", &state, &ppid, &pgrp, &session, &tty_nr);
+
+    return tty_nr;
+}
+
+static void read_user_info(pid_t pid, ProcessInfo *proc) {
+    char path[MAX_PATH_LEN];
+    snprintf(path, sizeof(path), "/proc/%d/status", pid);
+
+    proc->uid = 0;
+    snprintf(proc->user, sizeof(proc->user), "unknown");
+
+    FILE *fp = fopen(path, "r");
+    if (!fp) {
+        return;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, "Uid:", 4) == 0) {
+            unsigned int real_uid = 0;
+            if (sscanf(line + 4, "%u", &real_uid) == 1) {
+                proc->uid = (uid_t)real_uid;
+                struct passwd *pw = getpwuid(proc->uid);
+                if (pw && pw->pw_name) {
+                    strncpy(proc->user, pw->pw_name, sizeof(proc->user) - 1);
+                    proc->user[sizeof(proc->user) - 1] = '\0';
+                } else {
+                    snprintf(proc->user, sizeof(proc->user), "%u", real_uid);
+                }
+            }
+            break;
+        }
+    }
+
+    fclose(fp);
+}
+
+static void read_cmdline(pid_t pid, ProcessInfo *proc) {
+    char path[MAX_PATH_LEN];
+    snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        size_t len = strlen(proc->comm) + 3;
+        proc->cmdline = malloc(len);
+        if (proc->cmdline) {
+            snprintf(proc->cmdline, len, "[%s]", proc->comm);
+        }
+        return;
+    }
+
+    char buffer[4096];
+    size_t bytes_read = fread(buffer, 1, sizeof(buffer) - 1, fp);
+    fclose(fp);
+
+    if (bytes_read == 0) {
+        size_t len = strlen(proc->comm) + 3;
+        proc->cmdline = malloc(len);
+        if (proc->cmdline) {
+            snprintf(proc->cmdline, len, "[%s]", proc->comm);
+        }
+        return;
+    }
+
+    for (size_t i = 0; i < bytes_read - 1; i++) {
+        if (buffer[i] == '\0') {
+            buffer[i] = ' ';
+        }
+    }
+    buffer[bytes_read] = '\0';
+
+    proc->cmdline = malloc(bytes_read + 1);
+    if (proc->cmdline) {
+        memcpy(proc->cmdline, buffer, bytes_read + 1);
+    }
+}
+
 int read_process_info(pid_t pid, ProcessInfo *proc) {
     if (!proc) {
         return -1;
@@ -81,7 +181,6 @@ int read_process_info(pid_t pid, ProcessInfo *proc) {
     }
     fclose(fp);
 
-    /* Locate opening and closing parentheses for command name */
     char *open_paren = strchr(buffer, '(');
     char *close_paren = strrchr(buffer, ')');
 
@@ -147,6 +246,9 @@ int read_process_info(pid_t pid, ProcessInfo *proc) {
     }
     proc->rss_kb = (rss * page_size) / 1024;
 
+    read_user_info(pid, proc);
+    read_cmdline(pid, proc);
+
     return 0;
 }
 
@@ -155,4 +257,67 @@ void free_process_info(ProcessInfo *proc) {
         free(proc->cmdline);
         proc->cmdline = NULL;
     }
+}
+
+ProcessList* get_all_processes(void) {
+    DIR *dir = opendir("/proc");
+    if (!dir) {
+        perror("Error opening /proc");
+        return NULL;
+    }
+
+    ProcessList *list = malloc(sizeof(ProcessList));
+    if (!list) {
+        closedir(dir);
+        return NULL;
+    }
+
+    list->capacity = 64;
+    list->count = 0;
+    list->items = malloc(list->capacity * sizeof(ProcessInfo));
+    if (!list->items) {
+        free(list);
+        closedir(dir);
+        return NULL;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (!is_pid_dir(entry->d_name)) {
+            continue;
+        }
+
+        pid_t pid = (pid_t)atoi(entry->d_name);
+        ProcessInfo proc;
+
+        if (read_process_info(pid, &proc) == 0) {
+            if (list->count >= list->capacity) {
+                size_t new_capacity = list->capacity * 2;
+                ProcessInfo *new_items = realloc(list->items, new_capacity * sizeof(ProcessInfo));
+                if (!new_items) {
+                    free_process_info(&proc);
+                    break;
+                }
+                list->items = new_items;
+                list->capacity = new_capacity;
+            }
+            list->items[list->count++] = proc;
+        }
+    }
+
+    closedir(dir);
+    return list;
+}
+
+void free_process_list(ProcessList *list) {
+    if (!list) {
+        return;
+    }
+    if (list->items) {
+        for (size_t i = 0; i < list->count; i++) {
+            free_process_info(&list->items[i]);
+        }
+        free(list->items);
+    }
+    free(list);
 }
