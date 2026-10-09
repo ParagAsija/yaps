@@ -27,8 +27,33 @@ static int compare_process_by_pid(const void *a, const void *b) {
     return 0;
 }
 
+static int should_display(const ProcessInfo *proc, const DisplayOptions *opts, int current_tty_nr) {
+    if (opts->filter_pid != -1) {
+        return (proc->pid == opts->filter_pid);
+    }
+
+    if (opts->filter_user[0] != '\0') {
+        if (strcmp(proc->user, opts->filter_user) != 0) {
+            return 0;
+        }
+    }
+
+    if (opts->show_all) {
+        return 1;
+    }
+
+    if (opts->all_with_terminal) {
+        return (proc->tty_nr > 0);
+    }
+
+    if (current_tty_nr > 0) {
+        return (proc->tty_nr == current_tty_nr);
+    }
+
+    return 1;
+}
+
 void print_processes(const ProcessList *list, const DisplayOptions *opts, int current_tty_nr) {
-    (void)current_tty_nr; /* Will be used in Day 5 for terminal filtering */
     if (!list || list->count == 0) {
         printf("No processes found.\n");
         return;
@@ -48,6 +73,11 @@ void print_processes(const ProcessList *list, const DisplayOptions *opts, int cu
 
     for (size_t i = 0; i < list->count; i++) {
         const ProcessInfo *proc = &list->items[i];
+
+        if (!should_display(proc, opts, current_tty_nr)) {
+            continue;
+        }
+
         format_time(proc->total_time, time_str, sizeof(time_str));
 
         const char *cmd_display = opts->full_format ?
@@ -66,5 +96,19 @@ void print_processes(const ProcessList *list, const DisplayOptions *opts, int cu
 
 void print_usage(const char *prog_name) {
     printf("myps - A lightweight, educational process status utility for Linux\n\n");
-    printf("Usage:\n  %s [options]\n", prog_name);
+    printf("Usage:\n");
+    printf("  %s [options]\n\n", prog_name);
+    printf("Options:\n");
+    printf("  -e, -A          Select all processes across the entire system\n");
+    printf("  -a              Select all processes attached to any terminal\n");
+    printf("  -f              Full-format listing (shows UID, PID, PPID, etc.)\n");
+    printf("  -u <username>   Select processes owned by a specific username\n");
+    printf("  -p <pid>        Select a single process by its numerical PID\n");
+    printf("  -h, --help      Display this help manual\n\n");
+    printf("Examples:\n");
+    printf("  %s              # Show processes attached to the current terminal\n", prog_name);
+    printf("  %s -e           # Show all active processes on the system\n", prog_name);
+    printf("  %s -ef          # Show all processes with detailed columns\n", prog_name);
+    printf("  %s -u root      # Show all processes owned by user 'root'\n", prog_name);
+    printf("  %s -p 1         # Show details for init/systemd (PID 1)\n", prog_name);
 }
